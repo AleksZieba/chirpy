@@ -3,17 +3,34 @@ package main
 import (
 	"log"
 	"net/http"
-	"time"
+	//"time"
 )
 
-func main() {
+/*func main() {
+	handler := http.FileServer(http.Dir("."))
 	serveMux := http.NewServeMux()
+	serveMux.Handle("/assets/logo.png", handler)
 	s := &http.Server{
 		Addr:           ":8080",
 		Handler:        serveMux,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   10 * time.Second,
-		MaxHeaderBytes: 1 << 20,
 	}
+	log.Fatal(s.ListenAndServe())
+}*/ 
+
+//var handler = http.FileServer(http.Dir("."))
+//var serveMux = http.NewServeMux()
+
+func initServer() *http.Server {
+	handler := http.FileServer(http.Dir("."))
+	serveMux := http.NewServeMux()
+	serveMux.Handle("/assets/logo.png", handler)
+	return &http.Server{
+		Addr:           ":8080",
+		Handler:        serveMux,
+	}
+}
+
+func main() {
+	s := initServer()
 	log.Fatal(s.ListenAndServe())
 }
