@@ -8,12 +8,35 @@ import (
 	"strconv" 
 	"io" 
 	"encoding/json" 
-	//"time"
+	"time" 
+	"strings" 
+	_ "github.com/lib/pq" 
+	"database/sql"
+	"github.com/joho/godotenv" 
+	"os"
+	"github.com/AleksZieba/chirpy/internal/database"
+	"github.com/google/uuid"
+	//"context"
 )
 
-func main() {
+func main() { 
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL") 
+	db, err := sql.Open("postgres", dbURL) 
+	if err != nil {
+		log.Fatal(err)
+	} 
+	
+	dbQueries := database.New(db)
+	modApiConfig(&apiCfg, *dbQueries)
+
 	s := initServer()
 	log.Fatal(s.ListenAndServe())
+} 
+
+type apiConfig struct {
+	fileserverHits 	atomic.Int32 
+	DB 				database.Queries
 } 
 
 var apiCfg = apiConfig{}
@@ -29,6 +52,7 @@ func initServer() *http.Server {
 	serveMux.HandleFunc("GET /admin/metrics", totalHitsHandler) 
 	serveMux.HandleFunc("POST /admin/reset", resetHitsHandler)
 	serveMux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	serveMux.HandleFunc("POST /api/users", createUserHandler)
 	return &http.Server{
 		Addr:           ":8080",
 		Handler:        serveMux,
@@ -45,9 +69,9 @@ func healthzHandler(w http.ResponseWriter, r *http.Request) {
 	} 
 } 
 
-type apiConfig struct {
-	fileserverHits atomic.Int32
-} 
+func modApiConfig(aC *apiConfig, dbQ database.Queries) {
+	aC.DB = dbQ
+}
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,9 +99,20 @@ func totalHitsHandler(w http.ResponseWriter, r *http.Request) {
 
 func resetHitsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK) 
-	apiCfg = apiConfig{}
+	//w.WriteHeader(http.StatusOK) 
+	apiCfg.fileserverHits.Store(0)
+	err := apiCfg.DB.DeleteAllUsers(r.Context())
+	if err != nil {
+		log.Fatalf("error reseting users table: %v\n", err)
+	} 
+	w.WriteHeader(http.StatusOK)
 }  
+
+type profaneWords struct {
+	wordlist	[]string
+} 
+
+var badWords = []string{"kerfuffle", "sharbert", "fornax",}
 
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
@@ -85,17 +120,17 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	type returnVals struct {
-        // the key will be the name of struct field unless you give it an explicit JSON tag
         //CreatedAt time.Time `json:"created_at"`
         //ID int `json:"id"` 
-		Valid bool `json:"valid"`
+		//Valid bool `json:"valid"`
+		Body string `json:"cleaned_body"`
     } 
 
-	respBody := returnVals{
+	respBody := returnVals{}
 		//CreatedAt: time.Now(),
 		//ID: 123, 
-		Valid: true,
-	}
+		//Valid: true,
+	//}
 
 	params := parameters{}
 	
@@ -126,16 +161,29 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Fatal("failed to write response")
 		}
-		
 		return
+	} else if containsProfanity(params.Body) {
+		respBody.Body = cleanBody(params.Body)
+		dat, err := json.Marshal(respBody)
+		if err != nil {
+				log.Printf("Error marshalling JSON: %s", err)
+				w.WriteHeader(500)
+				return
+		} 
+		w.Header().Set("Content-Type", "application/json")
+		_, err = w.Write(dat)
+		if err != nil {
+			log.Fatal("failed to write response")
+			return 
+		}
 	} else { 
+		respBody.Body = params.Body
 		dat, err := json.Marshal(respBody)
 		if err != nil {
 				log.Printf("Error marshalling JSON: %s", err)
 				w.WriteHeader(500)
 				return
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		_, err = w.Write(dat)
 		if err != nil {
@@ -145,18 +193,91 @@ func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 } 
 
+func containsProfanity(reqBody string) bool {
+	//bodySlice := strings.Split(strings.ToLower(reqBody), " ") 
+	if strings.Contains(reqBody, "kerfuffle") == true {
+		return true 
+	}  
+	if strings.Contains(reqBody, "sharbert") == true {
+		return true 
+	} 
+	if strings.Contains(reqBody, "fornax") == true {
+		return true 
+	} 
+	return false
+}
 
-    //decoder := json.NewDecoder(r.Body)
-    
-/*    err := decoder.Decode(&params)
-    if err != nil {
-        // an error will be thrown if the JSON is invalid or has the wrong types
-        // any missing fields will simply have their values in the struct set to their zero value
+func cleanBody(reqBody string) string {
+	bodySlice := strings.Split(reqBody, " ")
+	bodySliceLower := strings.Split(strings.ToLower(reqBody), " ")
+	for i, word := range(bodySliceLower) {
+		if word == "" {
+			continue
+		} 
+		for _, badword := range(badWords) {
+			if badword == word {
+			bodySlice[i] = "****"
+			}
+		} 
+	}
+	return strings.Join(bodySlice, " ")	
+}
+
+type jsonUser struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func createUserHandler(w http.ResponseWriter, r *http.Request) {
+	newUser := jsonUser{}
+	
+	bytesBody, err := io.ReadAll(r.Body) 
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(fmt.Sprintf(`{"error": "something went wrong"}`))) 
+			if err != nil {
+				log.Fatal("failed to write response")
+			}
+			//w.WriteHeader(400)
+			return
+		}
+	err = json.Unmarshal(bytesBody, &newUser)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(fmt.Sprintf(`{"error": "something went wrong"}`))) 
+			if err != nil {
+				log.Fatal("failed to write response")
+			}
+			//w.WriteHeader(400)
+			return
+		} 
+	user, err := apiCfg.DB.CreateUser(r.Context(), newUser.Email) 
+		if err != nil {
+			log.Fatalf("failed to create user: %v", err) 
+			return
+		} 
+	jsonU := dbUserToMarshallingUser(user) 
+	dat, err := json.Marshal(jsonU)
+		if err != nil {
+				log.Printf("Error marshalling JSON: %s", err)
+				w.WriteHeader(500)
+				return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(fmt.Sprintf(`{"error": "something went wrong"}`)))
-		w.WriteHeader(400)
-		return
-    }
-    // params is a struct with data populated successfully
-    // ...
-*/
+		_, err = w.Write(dat)
+		if err != nil {
+			log.Fatal("failed to write response")
+			return 
+		}
+} 
+
+func dbUserToMarshallingUser(dbUser database.User) jsonUser {
+	return jsonUser {
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+}
