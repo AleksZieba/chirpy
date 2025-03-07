@@ -51,8 +51,9 @@ func initServer() *http.Server {
 	serveMux.HandleFunc("GET /api/healthz", healthzHandler) 
 	serveMux.HandleFunc("GET /admin/metrics", totalHitsHandler) 
 	serveMux.HandleFunc("POST /admin/reset", resetHitsHandler)
-	serveMux.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
-	serveMux.HandleFunc("POST /api/users", createUserHandler)
+	serveMux.HandleFunc("POST /api/chirps", createChirpHandler)
+	serveMux.HandleFunc("POST /api/users", createUserHandler) 
+	//serveMux.HandleFunc("GET /api/chirps", getAllChirpsHandler)
 	return &http.Server{
 		Addr:           ":8080",
 		Handler:        serveMux,
@@ -114,84 +115,82 @@ type profaneWords struct {
 
 var badWords = []string{"kerfuffle", "sharbert", "fornax",}
 
-func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-        Body string `json:"body"` 
-	}
-	
-	type returnVals struct {
-        //CreatedAt time.Time `json:"created_at"`
-        //ID int `json:"id"` 
-		//Valid bool `json:"valid"`
-		Body string `json:"cleaned_body"`
-    } 
+func createChirpHandler(w http.ResponseWriter, r *http.Request) {
+    // Define request structure
+    type ChirpRequest struct {
+        Body   string `json:"body"`
+        UserID string `json:"user_id"`
+    }
 
-	respBody := returnVals{}
-		//CreatedAt: time.Now(),
-		//ID: 123, 
-		//Valid: true,
-	//}
+    // Parse request body
+    var req ChirpRequest
+    err := json.NewDecoder(r.Body).Decode(&req)
+    if err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": "Invalid request body"})
+        return
+    }
 
-	params := parameters{}
-	
-	bytesBody, err := io.ReadAll(r.Body) 
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			_, err := w.Write([]byte(fmt.Sprintf(`{"error": "something went wrong"}`))) 
-			if err != nil {
-				log.Fatal("failed to write response")
-			}
-			//w.WriteHeader(400)
-			return
-		}
-	err = json.Unmarshal(bytesBody, &params)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			_, err := w.Write([]byte(fmt.Sprintf(`{"error": "something went wrong"}`))) 
-			if err != nil {
-				log.Fatal("failed to write response")
-			}
-			//w.WriteHeader(400)
-			return
-		}
-	if len(params.Body) > 140 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		_, err := w.Write([]byte(fmt.Sprintf(`{"error": "Chirp is too long"}`))) 
-		if err != nil {
-			log.Fatal("failed to write response")
-		}
-		return
-	} else if containsProfanity(params.Body) {
-		respBody.Body = cleanBody(params.Body)
-		dat, err := json.Marshal(respBody)
-		if err != nil {
-				log.Printf("Error marshalling JSON: %s", err)
-				w.WriteHeader(500)
-				return
-		} 
-		w.Header().Set("Content-Type", "application/json")
-		_, err = w.Write(dat)
-		if err != nil {
-			log.Fatal("failed to write response")
-			return 
-		}
-	} else { 
-		respBody.Body = params.Body
-		dat, err := json.Marshal(respBody)
-		if err != nil {
-				log.Printf("Error marshalling JSON: %s", err)
-				w.WriteHeader(500)
-				return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, err = w.Write(dat)
-		if err != nil {
-			log.Fatal("failed to write response")
-			return 
-		}
-	}
-} 
+    // Validate chirp length
+    if len(req.Body) > 140 {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": "Chirp is too long"})
+        return
+    }
+
+    // Clean profanity if present
+    cleanedBody := req.Body
+    if containsProfanity(req.Body) {
+        cleanedBody = cleanBody(req.Body)
+    }
+
+    // Parse UserID from string to UUID
+    userID, err := uuid.Parse(req.UserID)
+    if err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(map[string]string{"error": "Invalid user ID"})
+        return
+    }
+
+    // Create chirp in database
+	params := database.CreateChirpParams{
+        Body:     	cleanedBody,
+        UserID: 	userID,
+    }
+    
+    chirp, err := apiCfg.DB.CreateChirp(r.Context(), params)
+    if err != nil {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusInternalServerError)
+        json.NewEncoder(w).Encode(map[string]string{"error": "Failed to create chirp"})
+        return
+    }
+
+    // Format response
+    type ChirpResponse struct {
+        ID        string    `json:"id"`
+        CreatedAt time.Time `json:"created_at"`
+        UpdatedAt time.Time `json:"updated_at"`
+        Body      string    `json:"body"`
+        UserID    string    `json:"user_id"`
+    }
+
+    resp := ChirpResponse{
+        ID:        chirp.ID.String(),
+        CreatedAt: chirp.CreatedAt,
+        UpdatedAt: chirp.UpdatedAt,
+        Body:      chirp.Body,
+        UserID:    chirp.UserID.String(),
+    }
+
+    // Return successful response
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(resp)
+}
 
 func containsProfanity(reqBody string) bool {
 	//bodySlice := strings.Split(strings.ToLower(reqBody), " ") 
@@ -265,11 +264,12 @@ func createUserHandler(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(500)
 				return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, err = w.Write(dat)
-		if err != nil {
-			log.Fatal("failed to write response")
-			return 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, err = w.Write(dat)
+	if err != nil {
+		log.Fatal("failed to write response")
+		return 
 		}
 } 
 
@@ -280,4 +280,59 @@ func dbUserToMarshallingUser(dbUser database.User) jsonUser {
 		UpdatedAt: dbUser.UpdatedAt,
 		Email:     dbUser.Email,
 	}
+} 
+
+type jsonChirp struct {
+	ID        	uuid.UUID 		`json:"id"`
+	CreatedAt 	time.Time 		`json:"created_at"`
+	UpdatedAt 	time.Time 		`json:"updated_at"`
+	Body   		string			`json:"body"`
+	UserID 		uuid.UUID		`json:"userID"`
 }
+/*
+func getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	type ChirpResponse struct {
+        ID        string    `json:"id"`
+        CreatedAt time.Time `json:"created_at"`
+        UpdatedAt time.Time `json:"updated_at"`
+        Body      string    `json:"body"`
+        UserID    string    `json:"user_id"`
+    }
+
+    resp := ChirpResponse{
+        ID:        chirp.ID.String(),
+        CreatedAt: chirp.CreatedAt,
+        UpdatedAt: chirp.UpdatedAt,
+        Body:      chirp.Body,
+        UserID:    chirp.UserID.String(),
+    }
+} 
+*/
+/*
+func respondWithError(w http.ResponseWriter, code int, msg string, err error) {
+	if err != nil {
+		log.Println(err)
+	}
+	if code > 499 {
+		log.Printf("Responding with 5XX error: %s", msg)
+	}
+	type errorResponse struct {
+		Error string `json:"error"`
+	}
+	respondWithJSON(w, code, errorResponse{
+		Error: msg,
+	})
+}
+
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	dat, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Error marshalling JSON: %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(code)
+	w.Write(dat)
+} 
+*/
