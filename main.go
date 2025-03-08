@@ -53,7 +53,8 @@ func initServer() *http.Server {
 	serveMux.HandleFunc("POST /admin/reset", resetHitsHandler)
 	serveMux.HandleFunc("POST /api/chirps", createChirpHandler)
 	serveMux.HandleFunc("POST /api/users", createUserHandler) 
-	//serveMux.HandleFunc("GET /api/chirps", getAllChirpsHandler)
+	serveMux.HandleFunc("GET /api/chirps", getAllChirpsHandler)
+	serveMux.HandleFunc("GET /api/chirps/", getChirpHandler)
 	return &http.Server{
 		Addr:           ":8080",
 		Handler:        serveMux,
@@ -289,23 +290,63 @@ type jsonChirp struct {
 	Body   		string			`json:"body"`
 	UserID 		uuid.UUID		`json:"userID"`
 }
-/*
-func getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	type ChirpResponse struct {
-        ID        string    `json:"id"`
-        CreatedAt time.Time `json:"created_at"`
-        UpdatedAt time.Time `json:"updated_at"`
-        Body      string    `json:"body"`
-        UserID    string    `json:"user_id"`
-    }
 
-    resp := ChirpResponse{
+func getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := apiCfg.DB.GetAllChirps(r.Context())
+	if err != nil {
+		log.Fatal("Failed to retrieve All Chirps\n")
+		return
+	}
+	// Convert database chirps to response chirps
+	chirps := make([]jsonChirp, len(dbChirps))
+	for i, c := range dbChirps {
+		chirps[i] = jsonChirp{
+		ID: 		c.ID, 
+		CreatedAt:	c.CreatedAt,
+		UpdatedAt:  c.UpdatedAt, 
+		Body:		c.Body,
+		UserID:		c.UserID, 
+		} 
+	}
+	respondWithJSON(w, 200, chirps)
+	
+}
+
+func getChirpHandler(w http.ResponseWriter, r *http.Request) {
+	chirpID := strings.TrimPrefix(r.URL.Path, "/api/chirps/")
+
+	// Parse the string to uuid.UUID
+	id, err := uuid.Parse(chirpID)
+	if err != nil {
+		log.Fatal("Invalid UUID:", err) 
+		return 
+	}
+	dbChirp, err := apiCfg.DB.GetChirp(r.Context(), id) 
+	if err != nil {
+		log.Fatal("Failed to retrieve Chirp\n")
+		return
+	}  
+	chirp := jsonChirp{
+		ID: 		dbChirp.ID, 
+		CreatedAt:	dbChirp.CreatedAt,
+		UpdatedAt:  dbChirp.UpdatedAt, 
+		Body:		dbChirp.Body,
+		UserID:		dbChirp.UserID, 
+	}
+	
+	respondWithJSON(w, 200, chirp)
+	
+}
+/*
+func dbChirptoChirpResponse(dbc database.Chirp) ChirpResponse {
+	return ChirpResponse{
         ID:        chirp.ID.String(),
         CreatedAt: chirp.CreatedAt,
         UpdatedAt: chirp.UpdatedAt,
         Body:      chirp.Body,
         UserID:    chirp.UserID.String(),
-    }
+    } 
+
 } 
 */
 /*
@@ -323,7 +364,7 @@ func respondWithError(w http.ResponseWriter, code int, msg string, err error) {
 		Error: msg,
 	})
 }
-
+*/
 func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	dat, err := json.Marshal(payload)
@@ -335,4 +376,3 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.WriteHeader(code)
 	w.Write(dat)
 } 
-*/
